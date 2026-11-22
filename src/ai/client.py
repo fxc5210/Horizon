@@ -1,6 +1,6 @@
 """AI client abstraction supporting multiple providers."""
 
-import os
+import asyncio, os, time
 import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
@@ -517,6 +517,7 @@ class GeminiClient(AIClient):
     """Client for Google Gemini models."""
 
     def __init__(self, config: AIConfig):
+        
         """Initialize Gemini client.
 
         Args:
@@ -531,6 +532,12 @@ class GeminiClient(AIClient):
         self.client = genai.Client(api_key=api_key)
         self.model = config.model
         self.temperature = config.temperature
+        # gemini-3.5-flash-lite free tier: 15 requests/minute.
+        # Pace all generate_content calls through one lock so the
+        # concurrent analysis/enrichment stages cannot burst past it.
+        self._rate_limit_lock = asyncio.Lock()
+        self._last_request_started_at = 0.0
+        self._min_request_interval_sec = 4.5
         self.max_tokens = config.max_tokens
 
     async def complete(
@@ -553,6 +560,12 @@ class GeminiClient(AIClient):
         """
         temperature = self.temperature if temperature is None else temperature
         max_tokens = self.max_tokens if max_tokens is None else max_tokens
+        async with self._rate_limit_lock:
+            now = time.monotonic()
+            wait_sec = self._min_request_interval_sec - (now - self._last_request_started_at)
+            if wait_sec > 0:
+                await asyncio.sleep(wait_sec)
+            self._last_request_started_at = time.monotonic()
 
         response = await self.client.aio.models.generate_content(
             model=self.model,
